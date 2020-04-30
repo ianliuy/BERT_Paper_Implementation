@@ -24,7 +24,9 @@ def load_vocab(dict_path,
         startwith = startwith or []
         for t in startwith:
             new_token_dict[t] = len(new_token_dict)
-            # 这一步是什么意思? 不应该是token_dict吗?
+            # 这一步是什么意思? 不应该是new_token_dict吗?
+            # 或者说 keep_tokens是干什么的list?
+            # keep_token就是为了去掉cjk和标点，那startwith又是干什么的?
             keep_tokens.append(token_dict[t])
 
         # Return a new list containing all items from the iterable in ascending order.
@@ -32,12 +34,27 @@ def load_vocab(dict_path,
         # reverse flag can be set to request the result in descending order.
 
         # Dictionary in Python is an unordered collection of data values
+
+        # dict.item()返回一个dict_items对象，是一个list，里面有很多key value的pair
+        # 这里的lambda s: s[1] 就是把id(value)取出
+        # t就是排序id(value)后的token(key)
         for t, _ in sorted(token_dict.items(), key=lambda s: s[1]):
             if t not in new_token_dict:
+                keep = True
+                if len(t) > 1:
+                    for c in (t[2:] if t[:2] == '##' else t):
+                        if (Tokenizer._is_cjk_character(c) or Tokenizer._is_punctuation(c)):
+                            keep = False
+                            break
+                # 经过上面的判断条件，keep下来的符号有
+                # [CLS]等特殊token、英文token
+                if keep:
+                    new_token_dict[t] = len(new_token_dict)
+                    keep_tokens.append(token_dict[t])
 
-
-
-
+        return new_token_dict, keep_tokens
+    else:
+        return token_dict
 
 # 这个encode(), 是BasicTokenizer写的, 说实话, 想重写不直接
 class BasicTokenizer(object):
