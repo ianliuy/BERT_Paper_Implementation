@@ -13,23 +13,23 @@
 但是这个类我没有用到
 因此无需设计如此复杂
 ```
-并且原设计增加了逻辑复杂性
+并且原设计增加了逻辑复杂性，本项目尽量简单实现
 ```
 以基础的encode方法为例
 encode方法在BasicTokenizer中实现，其中一个很重要的过程是tokens_to_ids
 tokens_to_ids方法在BasicTokenizer中实现，其实是逐个token使用token_to_id方法
-token_to_id方法在BasicTokenizer中没实现，只是raise一个NotImplementedError
+token_to_id方法没在BasicTokenizer中实现，只是raise一个NotImplementedError
 token_to_id方法的真正实现在Tokenizer类中
 如果以上三个方法encode、tokens_to_ids、token_to_id都在一个类里
 那么逻辑就相对清晰一些
-```
 （虽然我承认换个角度说这是OOP的优点之一）
+```
 
 ## Reimplement 方法论
 
 **逐步**、**渐进**实现功能，最终目的是用自己写的代码完全代替keras4bert框架
 
-比如说官方编码句子(例子)[https://bert4keras.spaces.ac.cn/#_1]
+比如说官方编码句子[例子](https://bert4keras.spaces.ac.cn/#_1)
 
 ```python
 from bert4keras.models import build_transformer_model
