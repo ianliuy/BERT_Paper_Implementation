@@ -1,13 +1,13 @@
-# Reimplement_keras4bert
-自己实现的keras4bert，在一个文件内写出所有功能，并且尽量逻辑清晰
+# Reimplement_bert4keras
+自己实现的bert4keras，在一个文件内写出所有功能，并且尽量逻辑清晰
 ## 哲学
 
-尽量只使用keras、tensorflow这种库，逐步不使用keras4bert库
+尽量只使用keras、tensorflow这种库，逐步不使用bert4keras库
 
 用到的功能一定**自己**实现，没用到的功能尽量不实现
 
 ```
-比如keras4bert里的Tokenizer类继承了BasicTokenizer类，但是两个类有高度相似性。
+比如bert4keras里的Tokenizer类继承了BasicTokenizer类，但是两个类有高度相似性。
 我就尽量把它合成一个类
 原作者分离出基类的原因是另一个类SpTokenizer继承了BasicTokenizer，
 但是这个类我没有用到
