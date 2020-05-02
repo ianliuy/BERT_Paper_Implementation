@@ -351,7 +351,7 @@ class Tokenizer(BasicTokenizer):
                123 <= code <= 126 or \
                unicodedata.category(ch).startswith('P')
 
-roberta_dir = "."
+roberta_dir = "C:/JupyterWorkspace/sentiment-keras4bert/roberta"
 config_path = f"{roberta_dir}/bert_config.json"
 ckpt_path = f"{roberta_dir}/bert_model.ckpt"
 dict_path = f"{roberta_dir}/vocab.txt"
