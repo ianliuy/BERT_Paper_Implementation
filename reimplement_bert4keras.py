@@ -18,37 +18,7 @@ def load_vocab(dict_path,
 
     return token_dict
 
-# 这个encode(), 是BasicTokenizer写的, 说实话, 想重写不直接
-class BasicTokenizer(object):
-    """分词器基类
-    """
-
-    def __init__(self,
-                 token_start='[CLS]',
-                 token_end='[SEP]',
-                 do_lower_case=False):
-        """初始化
-        """
-        self._token_pad = '[PAD]'
-        self._token_unk = '[UNK]'
-        self._tokne_mask = '[MASK]'
-        self._token_start = token_start
-        self._token_end = token_end
-        self._do_lower_case = do_lower_case
-
-    def _tokenize(self, text):
-        """基本分类器函数,需要在继承的类中自己实现
-        """
-        # return []
-        raise NotImplementedError
-
-    def token_to_id(self, token):
-        """token转换为相对应的id序列
-        """
-        return NotImplementedError
-
-
-class Tokenizer(BasicTokenizer):
+class Tokenizer(object):
     """实现自苏建林的Bert4keras
     https://github.com/bojone/bert4keras
     """
@@ -350,6 +320,103 @@ class Tokenizer(BasicTokenizer):
                91 <= code <= 96 or \
                123 <= code <= 126 or \
                unicodedata.category(ch).startswith('P')
+
+class BERT(M.Transformer):
+    """构建bert模型
+    """
+    def __init__(self,
+                 max_position, # 序列最大长度
+                 with_pool=False, # 是否包含Pool部分
+                 with_nsp=False, # 是否包含NSP部分
+                 with_mlm=False, # 是否包含MLM部分
+                 ** kwargs # 其余参数
+                 ):
+
+import json
+def build_transformer_model(config_path=None,
+                            checkpoint_path=None,
+                            model='bert',
+                            application='encoder',
+                            return_keras_model=True,
+                            **kwargs):
+    """根据配置文件构建模型, 可选加载checkpoint权重
+    inside "bert_config.json"
+    {
+      "attention_probs_dropout_prob": 0.1,
+      "directionality": "bidi",
+      "hidden_act": "gelu",
+      "hidden_dropout_prob": 0.1,
+      "hidden_size": 1024,
+      "initializer_range": 0.02,
+      "intermediate_size": 4096,
+      "max_position_embeddings": 512,
+      "num_attention_heads": 16,
+      "num_hidden_layers": 24,
+      "pooler_fc_size": 768,
+      "pooler_num_attention_heads": 12,
+      "pooler_num_fc_layers": 3,
+      "pooler_size_per_head": 128,
+      "pooler_type": "first_token_transform",
+      "type_vocab_size": 2,
+      "vocab_size": 21128
+    }
+    """
+    config = kwargs
+    if config_path is not None:
+        config.update(json.load(open(config_path)))
+    if 'max_position' not in config:
+        # "max_position_embeddings": 512,
+        config['max_position'] = config.get('max_position_embeddings')
+    if 'drop_out_rate' not in config:
+        # "hidden_dropout_prob": 0.1,
+        config['dropout_rate'] = config.get('hidden_dropout_prob')
+
+    model, application = model.lower(), application.lower()
+
+    models = {
+        'bert': M.BERT,
+        # 'albert': M.ALBERT,
+        # 'albert_unshare': M.ALBERT_Unshared,
+        # 'nezha': M.NEZHA,
+        # 'gpt2_ml': M.GPT2_ML,
+        # # 末尾也有一个逗号的原因: 改变时, 不改变原有行, 在源码检查, 管理时有用
+        # # 有没有逗号的字典的行为完全相同
+        # # https://stackoverflow.com/questions/29063868/does-the-extra-comma-at-the-end-of-a-dict-list-or-set-has-any-special-meaning
+        # 't5': M.T5,
+    }
+    # python对变量是区分大小写的
+    # Python 区分大小写吗？ https://blog.csdn.net/PoGeN1/article/details/82317956
+    MODEL = models[model]
+
+    if model != 'T5':
+        # application的意思我还没搞懂
+        # 但我猜是指语言模型的应用是什么
+        # 比如'encoder'就是作为编码器, 输入sentence 输出编码
+        if application == 'lm':
+            MODEL = M.extend_with_language_model(MODEL)
+        elif application == 'unilm':
+            MODEL = M.extend_with_unified_language_model(MODEL)
+
+    # 这里的kwargs的意思就是保持一致性
+    # 因为GPT2_ML的__init__里有**kwargs,
+    # Transformers的__init__里有**kwargs,
+    # 但是BERT里的super()是不是可以去掉
+    # 因为没有用到MRO
+    transformer = MODEL(**kwargs)
+    transformer.build(**kwargs)
+
+    if checkpoint_path is not None:
+        transformer.load_weights_from_checkpoint(checkpoint_path)
+
+    # 这一步没看懂, 为什么return transformer model就返回了.model
+    # 这是keras的机制吗?
+    # 或者是... 变量transformer实例化的类是什么?
+    if return_keras_model:
+        return transformer.model
+    else:
+        return transformer
+
+
 
 roberta_dir = "C:/JupyterWorkspace/sentiment-keras4bert/roberta"
 config_path = f"{roberta_dir}/bert_config.json"
