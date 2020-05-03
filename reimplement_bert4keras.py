@@ -521,7 +521,7 @@ class BERT(M.Transformer):
                       layer=L.Dropout,
                       rate=self.dropout_rate,
                       name='Embedding-Dropout')
-        
+
 
 
 
