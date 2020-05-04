@@ -406,13 +406,26 @@ class Transformer(object):
         ]
 
         # Embedding
+        # 这一步没看懂, 主要就是层之间的关系不懂
         outputs = self.prepare_embeddings(outputs)
 
+        # Main
+        for i in range (self.num_hidden_layers):
+            outputs = self.prepare_main_layers(outputs, i)
+
+        # Final
+        outputs = self.prepare_final_layers(outputs)
 
     def prepare_inputs(self):
         raise NotImplementedError
 
     def prepare_embeddings(self, inputs):
+        raise NotImplementedError
+
+    def prepare_main_layers(self, inputs, index):
+        raise NotImplementedError
+
+    def prepare_final_layers(self, inputs):
         raise NotImplementedError
 
 
@@ -482,6 +495,7 @@ class BERT(M.Transformer):
                       name='Embedding-Token')
         # 这一层就是建立一个embedding层
         # shape=(2, embedding_size) 我看不懂 真的想不出来
+        # self.initializer 竟然没定义, 我更不懂是什么意思了
         s = self.call(inputs=s,
                       layer=L.Embedding,
                       input_dim=2,
@@ -517,10 +531,134 @@ class BERT(M.Transformer):
                       hidden_actibation=self.layer_norm_conds[2], # layer_norm_cond_hidden_act or 'linear'
                       hidden_initializer=self.initializer,
                       name='Embedding-Norm')
+        # 我还是不懂, 什么是layer, 什么是inputs 什么是outputs
         x = self.call(inputs=x,
                       layer=L.Dropout,
                       rate=self.dropout_rate,
                       name='Embedding-Dropout')
+        if self.embedding_size != self.hidden_size:
+            # 意思就是说 将embedding map到一个另外的空间
+            # 说白了 就是用矩阵乘一下, 因为矩阵意味着变换
+            # What exactly do we mean by embeddings “mapping words to a high-dimensional semantic space”?
+            # https://towardsdatascience.com/why-do-we-use-embeddings-in-nlp-2f20e1b632d2
+            #
+            # Word embedding is the collective name for a set of
+            # language modeling and feature learning techniques in
+            # natural language processing (NLP) where words or phrases
+            # from the vocabulary are mapped to vectors of real numbers.
+            # Conceptually it involves a mathematical embedding from a space
+            # with many dimensions per word to a continuous vector space
+            # with a much lower dimension.
+            # https://en.wikipedia.org/wiki/Word_embedding
+            x = self.call(inputs=x,
+                          layer=L.Dense,
+                          units=self.hidden_size,
+                          kernel_initializer=self.initializer,
+                          name="Embedding-Mapping")
+
+        return x
+
+    def compute_attention_mask(self, inputs=None):
+        return self.attention_mask
+
+    def prepare_main_layers(self, inputs, index):
+        """Bert的主体是基于Multi-Head Self Attention多头自注意力机制
+        顺序: Att --> Add --> LN --> FFN --> Add --> LN
+        名词解释:
+        Att: Multi-Head Self Attention, 多头自注意力机制,
+            "Attention Is All You Need" https://arxiv.org/abs/1706.03762
+        Add: Att之前和之后的结果相加, ResNet的思路, 可以有效防止梯度消失
+            "Deep Residual Learning for Image Recognition" https://arxiv.org/abs/1512.03385
+        LN: Layer Normalization, 为了解决机器学习中的ICS问题,
+            "Layer Normalization", https://arxiv.org/abs/1607.06450
+            # 但是我不懂其中的原理. 没看懂
+            # "Layer Normalization Explained" https://leimao.github.io/blog/Layer-Normalization/
+        FFN: Feed Forward Neural Network/Multi-Layered Neural N(MLN), 前向神经网络, 最简单的神经网络
+            "Simulation Neuronaler Netze", https://scholar.google.com/scholar?cluster=3666297338783020225
+            "Feedforward Neural Networks Explained" https://hackernoon.com/deep-learning-feedforward-neural-networks-explained-c34ae3f084f1
+        Add: 同上
+        LN: 同上
+        """
+        x = inputs
+        # self.layer_norm_conds = [
+        #     layer_norm_cond,
+        #     layer_norm_cond_hidden_size,
+        #     layer_norm_cond_hidden_act or 'linear',
+        # ]
+        z = self.layer_norm_conds[0] # layer_norm_cond
+
+        attention_name = 'Transformer-%d-MultiHeadSelfAttention' % index
+        feed_forward_name = 'Tansformer-%d-FeedForward' % index
+        # 好像在transformer模型里并没有实现过程,
+        # 仅仅返回了self.attention_mask
+        # 而 self.attention_mask = None
+
+        # 按理说, 正常的attention_mask应该
+        # 开始: 是0或1的mask, 然后被计算后: 变成0或-10000(adder)
+        # 实现: attention_score = (1.0 - attention_mask) * -10000.0
+        # https://github.com/huggingface/transformers/blob/master/src/transformers/modeling_tf_openai.py#L282
+        # https://github.com/google-research/bert/blob/master/modeling.py#L709
+        attention_mask = self.compute_attention_mask()
+
+        # Multi-Head Self Attention
+        x1, x, arguments = x, [x, x, x], {'a_mask': None}
+        if attention_mask is not None:
+            arguments['a_mask'] = True
+            x.append(attention_mask)
+        x = self.call(inputs=x,
+                      layer=L.MultiHeadAttention,
+                      arguments=arguments,
+                      heads=self.num_attention_heads,
+                      kernel_initializer=self.initializer,
+                      name=attention_name) # attention_name = 'Transformer-%d-MultiHeadSelfAttention' % index
+        x = self.call(inputs=x,
+                      layer=L.Dropout,
+                      rate=self.dropout_rate,
+                      name='%s-Dropout' % attention_name)
+        # Add
+        x = self.call(inputs=[x1, x],
+                      layer=L.Add,
+                      name='%s-Add' % attention_name)
+        # LN
+        # z = self.layer_norm_conds[0] # layer_norm_cond
+        x = self.call(inputs=self.simplify([x, z]),
+                      layer=L.LayerNormalization,
+                      conditional=(z is not None),
+                      hidden_units=self.layer_norm_conds[1],
+                      hidden_activation=self.layer_norm_conds[2],
+                      hidden_initializer=self.initializer,
+                      name='%s-Norm' % attention_name)
+
+        # FFN
+        xi = x
+        x = self.call(inputs=x,
+                      layer=L.FeedForward,
+                      units=self.intermediate_size, # intermediate_size, # FeedForward的隐层维度
+                      activation=self.hidden_act,
+                      kernel_initializer=self.initializer,
+                      name=feed_forward_name) # feed_forward_name = 'Tansformer-%d-FeedForward' % index
+        x = self.call(inputs=x,
+                      layer=L.Dropout,
+                      rate=self.dropout_rate,
+                      name='%s-Dropout' % feed_forward_name)
+        # Add
+        x = self.call(inputs=[x1, x],
+                      layer=L.Add,
+                      name='%s-Add' % feed_forward_name)
+        # LN
+        x = self.call(inputs=self.simplify([x, z]),
+                      layer=L.LayerNormalization,
+                      conditional=(z is not None),
+                      hidden_units=self.layer_norm_conds[1],
+                      hidden_activation=self.layer_norm_conds[2],
+                      hidden_initializer=self.initializer,
+                      name='%s-Norm' % feed_forward_name)
+
+        return x
+
+def prepare_final_layers(self, inputs):
+    """根据剩余参数决定输出
+    """
 
 
 
