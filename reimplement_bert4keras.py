@@ -1,4 +1,5 @@
 # import bert4keras
+from keras.models import Model
 import bert4keras.models as M
 import bert4keras.layers as L
 import numpy as np
@@ -346,12 +347,12 @@ class Transformer(object):
             self.vocab_size = len(keep_tokens)
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
-        self.num_attention_lyers = num_attention_heads
+        self.num_attention_heads = num_attention_heads
         # 每个注意力头的长度 = 隐层长度 整除 注意力头个数
         self.attention_head_size = hidden_size // num_attention_heads
         self.intermediate_size = intermediate_size
-        self.hidden_act = hidden_act
         self.dropout_rate = dropout_rate
+        self.hidden_act = hidden_act
         self.embedding_size = embedding_size or hidden_size
         self.keep_tokens = keep_tokens
         self.attention_mask = None
@@ -415,6 +416,10 @@ class Transformer(object):
 
         # Final
         outputs = self.prepare_final_layers(outputs)
+        self.set_outputs(outputs)
+
+        # Model
+        self.model = Model(self.inputs, self.outputs, name=self.name)
 
     def prepare_inputs(self):
         raise NotImplementedError
@@ -428,6 +433,35 @@ class Transformer(object):
     def prepare_final_layers(self, inputs):
         raise NotImplementedError
 
+    def set_outputs(self, outputs):
+        """设置output和outputs属性
+        """
+        if not isinstance(outputs, list):
+            outputs = [outputs]
+
+        outputs = outputs[:]
+        self.outputs = outputs
+        if len(outputs) > 1:
+            self.outputs = outputs
+        else:
+            self.outputs = outputs[0]
+
+
+
+    def simplify(self, inputs):
+        """将list中的None过滤掉
+        """
+        # 这里是python里的displays of list中的一种, 称为comprehension
+        # https://docs.python.org/3/reference/expressions.html#displays-for-lists-sets-and-dictionaries
+        # 这里有几个例子: PEP 202 -- List Comprehensions
+        # https://www.python.org/dev/peps/pep-0202/
+        # for开头, for后可以接无限个for, for后可以接一个if, if后可以接一个for
+        inputs = [i for i in inputs if i is not None]
+        # 去掉空的, 如果列表只剩一个元素, 那么就取出, 同时类型也不成为列表
+        if len(inputs) == 1:
+            inputs = inputs[0]
+
+        return inputs
 
 
 class BERT(M.Transformer):
@@ -656,11 +690,86 @@ class BERT(M.Transformer):
 
         return x
 
-def prepare_final_layers(self, inputs):
-    """根据剩余参数决定输出
-    """
+    def prepare_final_layers(self, inputs):
+        """根据剩余参数决定输出
+        """
+        # x就是之前层的outputs, 也就是这一层的inputs
+        # z就是layer_norm_cond的系列参数, 我看不懂
+        # outputs现在是仅有一个element为x的list
+        x = inputs
+        z = self.layer_norm_conds[0]
+        outputs = [x]
 
+        if self.with_pool or self.with_nsp:
+            # Pooler的作用：简单来说就是将每个句子的第一个token [CLS]的向量提取出来，作为分类的依据
+            # 更精确的说法是: Pooler convert the encoded tensor shape of
+            # [batch_size, sequence_length, hidden_units] to
+            # [batch_size, hidden_units]
+            # https://gluon-nlp.mxnet.io/_modules/gluonnlp/model/bert.html#BERTModel
+            # 我不懂, 为什么这里是lambda x:x[:, 0]
+            # 或者换句话说, x的shape是什么?
+            #
+            x = outputs[0]
+            x = self.call(inputs=x,
+                          layer=L.Lambda,
+                          function=lambda x:x[:, 0],
+                          name='Pooler')
+            # 这句话的意思就是, 如果with_pool=True, 默认'tanh'
+            # 如果with_pool='随便一个字符串', pool_activation='这个字符串'
+            pool_activation = 'tanh' if self.with_pool is True else self.with_pool
 
+            x = self.call(inputs=x,
+                          layer=L.Dense,
+                          units=self.hidden_size,
+                          activation=pool_activation,
+                          kernel_initializer=self.initializer,
+                          name='Pooler-Dense')
+            if self.with_nsp:
+                # Next Sentence Prediction
+                x = self.call(inputs=x,
+                              layer=L.Dense,
+                              units=2,
+                              activation='softmax',
+                              kernel_initializer=self.initializer,
+                              name='NSP-Proba')
+            outputs.append(x)
+
+        # Masked Language Model部分
+        if self.with_mlm:
+            x = outputs[0]
+            x = self.call(inputs=x,
+                          layer=L.Dense,
+                          unit=self.embedding_size,
+                          activation=self.hidden_size,
+                          kernel_initializer=self.initializer,
+                          name='MLM-Dense')
+            # 我还是没搞懂simplify是什么
+            # simplify就是去掉列表里的None元素
+            x = self.call(inputs=self.simplify([x, z]),
+                          layer=L.LayerNormalization,
+                          conditional=(z is not None),
+                          hidden_units=self.layer_norm_conds[1],
+                          hidden_activation=self.layer_norm_conds[2],
+                          hidden_initializer=self.initializer,
+                          name='MLM-Nom')
+            mlm_activation = 'softmax' if self.with_mlm is True else self.with_mlm
+            x = self.call(inputs=x,
+                          layer=L.Embedding,
+                          embedding_name='Embedding-Token',
+                          activation=mlm_activation,
+                          name='MLM-Proba')
+            outputs.append(x)
+
+            # 这是什么意思, 看不懂
+            # 去掉开头的[CLS] token的意思吗?
+            if len(outputs) == 1:
+                outputs = outputs[0]
+            elif len(outputs) == 2:
+                outputs = outputs[1]
+            else:
+                outputs = outputs[1:]
+
+            return outputs
 
 
 import json
@@ -759,7 +868,7 @@ ckpt_path = f"{roberta_dir}/bert_model.ckpt"
 dict_path = f"{roberta_dir}/vocab.txt"
 
 tokenizer = Tokenizer(dict_path, do_lower_case=True)
-model = M.build_transformer_model(config_path=config_path, checkpoint_path=ckpt_path)
+model = M.build_transformer_model(config_path=config_path, checkpoint_path=ckpt_path, return_keras_model=True)
 
 token_ids, segment_ids = tokenizer.encode('语言模型')
 
