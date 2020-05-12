@@ -520,7 +520,7 @@ class Transformer(object):
 
 
 
-class BERT(M.Transformer):
+class BERT(Transformer):
     """构建bert模型
     """
     def __init__(self,
@@ -1005,6 +1005,8 @@ dict_path = f"{roberta_dir}/vocab.txt"
 
 tokenizer = Tokenizer(dict_path, do_lower_case=True)
 model = M.build_transformer_model(config_path=config_path, checkpoint_path=ckpt_path, return_keras_model=True)
+
+model.summary()
 
 token_ids, segment_ids = tokenizer.encode('语言模型')
 
