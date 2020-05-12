@@ -39,7 +39,7 @@ class Tokenizer(object):
 
         self._token_pad = '[PAD]'
         self._token_unk = '[UNK]'
-        self._tokne_mask = '[MASK]'
+        self._token_mask = '[MASK]'
         self._token_start = token_start
         self._token_end = token_end
         self._do_lower_case = do_lower_case
@@ -59,13 +59,80 @@ class Tokenizer(object):
             except:
                 pass
 
+    def tokenize(self, text, max_length=None):
+        """分词函数
+        1. 将unicode转换为ASCII, 然后转小写(如果lower case)
+        2. 分词[过程: 1. 标点, 中文字符: 前后加空格,
+                     2. 空格: 用统一的空格' '代替,
+                     3. 控制字符: 跳过
+                     4. 拆分, 经过以上四步得到的新的字符串, 得到列表
+                     5. 字内切分, 对列表内每个元素进行, 得到最终的列表]
+        3. 开头加入_token_start(如果有)
+        4. 结尾加入_token_end(如果有)
+        5. 截断到max_length长度(如果有)
+        """
+        if self._do_lower_case:
+            text = unicodedata.normalize('NFD', text)
+            text = ''.join([ch for ch in text if unicodedata.category(ch) != 'Mn'])
+            text = text.lower()
+
+        tokens = self._tokenize(text)
+        if self._token_start is not None:
+            """list_name.insert(index, element)
+            在list的给定index位置插入element
+            >>> list1 = [ 1, 2, 3, 4, 5, 6, 7 ]  
+            >>> # insert 10 at 4th index  
+            >>> list1.insert(4, 10)  
+            >>> print(list1) 
+            [1, 2, 3, 4, 10, 5, 6, 7]
+            在最前面插入[CLS]
+            """
+            tokens.insert(0, self._token_start)
+        if self._token_end is not None:
+            # 在最后插入[SEP]
+            tokens.append(self._token_end)
+
+        if max_length is not None:
+            # 这里只需要first_sequence是因为没有second_sequence
+            # -2是因为最后是[SEP], 去掉的是[SEP]前面的一个字符
+            self.truncate_sequence(max_length, tokens, None, -2)
+
+        return tokens
+
+    def tokens_to_ids(self, tokens):
+        """tokens列表变为ids列表
+        """
+        return [self._token_dict.get(token, self._token_unk_id) for token in tokens]
+
+    def truncate_sequence(self,
+                          max_length,
+                          first_sequence,
+                          second_sequence=None,
+                          pop_index=-1):
+        """截断总长度
+        # 如果两个串的总长度超过了max_length, 那么
+        # 长的串从后pop, 直到长度相等短的串, 如果仍超过
+        # 然后两者轮流pop, 直到两者长度之和小于max_length
+        """
+        if second_sequence is None:
+            second_sequence = []
+
+        while True:
+            total_length = len(first_sequence) + len(second_sequence)
+            if total_length <= max_length:
+                break
+            elif len(first_sequence) > len(second_sequence):
+                first_sequence.pop(pop_index)
+            else:
+                second_sequence.pop(pop_index)
+
     def encode(self,
                first_text,
                second_text=None,
                max_length=None,
                first_length=None,
                second_length=None):
-        """输出文本对应的token, id和segment id
+        """输出文本对应的token id和segment id
         如果传入first_length, 则强行padding第一个句子到指定长度
         second_length同理
         """
@@ -107,50 +174,10 @@ class Tokenizer(object):
 
         return first_token_ids, first_segment_ids
 
-    def tokens_to_ids(self, tokens):
-        """tokens列表变为ids列表
+    def ids_to_tokens(self, ids):
+        """类似id_to_token, 但是ids是iterable
         """
-        return [self._token_dict.get(token, self._token_unk_id) for token in tokens]
-
-    def tokenize(self, text, max_length=None):
-        """分词函数
-        1. 将unicode转换为ASCII, 然后转小写(如果lower case)
-        2. 分词[过程: 1. 标点, 中文字符: 前后加空格,
-                     2. 空格: 用统一的空格' '代替,
-                     3. 控制字符: 跳过
-                     4. 拆分, 经过以上四步得到的新的字符串, 得到列表
-                     5. 字内切分, 对列表内每个元素进行, 得到最终的列表]
-        3. 开头加入_token_start(如果有)
-        4. 结尾加入_token_end(如果有)
-        5. 截断到max_length长度(如果有)
-        """
-        if self._do_lower_case:
-            text = unicodedata.normalize('NFD', text)
-            text = ''.join([ch for ch in text if unicodedata.category(ch) != 'Mn'])
-            text = text.lower()
-
-        tokens = self._tokenize(text)
-        if self._token_start is not None:
-            """list_name.insert(index, element)
-            在list的给定index位置插入element
-            >>> list1 = [ 1, 2, 3, 4, 5, 6, 7 ]  
-            >>> # insert 10 at 4th index  
-            >>> list1.insert(4, 10)  
-            >>> print(list1) 
-            [1, 2, 3, 4, 10, 5, 6, 7]
-            在最前面插入[CLS]
-            """
-            tokens.insert(0, self._token_start)
-        if self._token_end is not None:
-            # 在最后插入[SEP]
-            tokens.append(self._token_end)
-
-        if max_length is not None:
-            # 这里只需要first_sequence是因为没有second_sequence
-            # -2是因为最后是[SEP], 去掉的是[SEP]前面的一个字符
-            self.truncate_sequence(max_length, tokens, None, -2)
-
-        return tokens
+        return list(self.id_to_token(id) for id in ids)
 
     def _tokenize(self, text):
         """基本分词函数, 被BasicTokenizer类的tokenize函数调用
@@ -204,8 +231,8 @@ class Tokenizer(object):
                     # 第二次"##阿比词"
                     # 第三次"##阿比"
                     # 第四次"##阿", 在字典中, break
-                    if sub in self._token_dict: break
-                    stop -= 1
+                if sub in self._token_dict: break
+                stop -= 1
             if start == stop:
                 # 如果连最小的"##阿"也不在字典里, 就不管字典了,
                 # 首先"##阿"加入tokens, 然后start加一, 跳过这个字搜索后面的字
@@ -216,28 +243,6 @@ class Tokenizer(object):
             start = stop
 
         return tokens
-
-    def truncate_sequence(self,
-                          max_length,
-                          first_sequence,
-                          second_sequence=None,
-                          pop_index=-1):
-        """截断总长度
-        # 如果两个串的总长度超过了max_length, 那么
-        # 长的串从后pop, 直到长度相等短的串, 如果仍超过
-        # 然后两者轮流pop, 直到两者长度之和小于max_length
-        """
-        if second_sequence is None:
-            second_sequence = []
-
-        while True:
-            total_length = len(first_sequence) + len(second_sequence)
-            if total_length <= max_length:
-                break
-            elif len(first_sequence) > len(second_sequence):
-                first_sequence.pop(pop_index)
-            else:
-                second_sequence.pop(pop_index)
 
     @staticmethod
     def _is_space(ch):
@@ -254,57 +259,6 @@ class Tokenizer(object):
                ch == '\r' or \
                ch == '\t' or \
                unicodedata.category(ch) == 'Zs'
-
-    @staticmethod
-    def _is_control(ch):
-        """控制类字符判断
-        Cc: Other, control
-        Cf: Other, format
-        """
-        return unicodedata.category(ch) in ['Cc', 'Cf']
-
-    def ids_to_tokens(self, ids):
-        """类似id_to_token, 但是ids是iterable
-        """
-        return list(self.id_to_token(id) for id in ids)
-
-    @staticmethod
-    def _is_special(ch):
-        """判断是否有特殊含义的符号
-        # https://www.geeksforgeeks.org/bool-in-python/
-        # Returns True as x is a non empty string
-        Example:
-        >>> x = 'GeeksforGeeks'
-        >>> print(bool(x))
-        True
-        """
-        # 这句话的意思是, 字符串不为空并且开头结尾是[]
-        return bool(ch) and (ch[0] == "[") and (ch[-1] == "]")
-
-    @staticmethod
-    def _is_cjk_character(ch):
-        """cjk类字符(包括中文字符也在此列)
-        参考: https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_(Unicode_block)
-        C: chinese, J: japanese, K: korean
-        0x4E00 <= code <= 0x9FFF, CJK Unified Ideographs, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_(Unicode_block)
-        0x3400 <= code <= 0x4DBF, CJK Unified Ideographs Extension A, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_Extension_A
-        0x20000 <= code <= 0x2A6DF, CJK Unified Ideographs Extension B, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_Extension_B
-        0x2A700 <= code <= 0x2B73F, CJK Unified Ideographs Extension C, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_Extension_C
-        0x2B740 <= code <= 0x2B81F, CJK Unified Ideographs Extension D, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_Extension_D
-        0x2B820 <= code <= 0x2CEAF, CJK Unified Ideographs Extension E, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_Extension_E
-        0x2CEB0 <= code <= 0x2EBEF, CJK Unified Ideographs Extension F, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_Extension_F
-        """
-
-        # The ord() function returns an integer representing the Unicode character.
-        # by the way, the ord function is the inverse of chr()
-        code = ord(ch)
-        return 0x4E00 <= code <= 0x9FFF or \
-               0x3400 <= code <= 0x4DBF or \
-               0x20000 <= code <= 0x2A6DF or \
-               0x2A700 <= code <= 0x2B73F or \
-               0x2B740 <= code <= 0x2B81F or \
-               0x2B820 <= code <= 0x2CEAF or \
-               0x2CEB0 <= code <= 0x2EBEF
 
     @staticmethod
     def _is_punctuation(ch):
@@ -324,6 +278,58 @@ class Tokenizer(object):
                91 <= code <= 96 or \
                123 <= code <= 126 or \
                unicodedata.category(ch).startswith('P')
+
+    @staticmethod
+    def _is_cjk_character(ch):
+        """cjk类字符(包括中文字符也在此列)
+        参考: https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_(Unicode_block)
+        C: chinese, J: japanese, K: korean
+        0x4E00 <= code <= 0x9FFF, CJK Unified Ideographs, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_(Unicode_block)
+        0x3400 <= code <= 0x4DBF, CJK Unified Ideographs Extension A, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_Extension_A
+        0x20000 <= code <= 0x2A6DF, CJK Unified Ideographs Extension B, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_Extension_B
+        0x2A700 <= code <= 0x2B73F, CJK Unified Ideographs Extension C, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_Extension_C
+        0x2B740 <= code <= 0x2B81F, CJK Unified Ideographs Extension D, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_Extension_D
+        0x2B820 <= code <= 0x2CEAF, CJK Unified Ideographs Extension E, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_Extension_E
+        0x2CEB0 <= code <= 0x2EBEF, CJK Unified Ideographs Extension F, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_Extension_F
+        0xF900 <= code <= 0xFADF, 兼容汉字
+        0x2F800 <= code <= 0x2FA1F, 兼容扩展
+        rference: https://www.cnblogs.com/straybirds/p/6392306.html
+        """
+
+        # The ord() function returns an integer representing the Unicode character.
+        # by the way, the ord function is the inverse of chr()
+        code = ord(ch)
+        return 0x4E00 <= code <= 0x9FFF or \
+               0x3400 <= code <= 0x4DBF or \
+               0x20000 <= code <= 0x2A6DF or \
+               0x2A700 <= code <= 0x2B73F or \
+               0x2B740 <= code <= 0x2B81F or \
+               0x2B820 <= code <= 0x2CEAF or \
+               0x2CEB0 <= code <= 0x2EBEF or \
+               0xF900 <= code <= 0xFADF or \
+               0x2F800 <= code <= 0x2FA1F
+
+
+    @staticmethod
+    def _is_control(ch):
+        """控制类字符判断
+        Cc: Other, control
+        Cf: Other, format
+        """
+        return unicodedata.category(ch) in ['Cc', 'Cf']
+
+    @staticmethod
+    def _is_special(ch):
+        """判断是否有特殊含义的符号
+        # https://www.geeksforgeeks.org/bool-in-python/
+        # Returns True as x is a non empty string
+        Example:
+        >>> x = 'GeeksforGeeks'
+        >>> print(bool(x))
+        True
+        """
+        # 这句话的意思是, 字符串不为空并且开头结尾是[]
+        return bool(ch) and (ch[0] == "[") and (ch[-1] == "]")
 
 class Transformer(object):
     """模型基类
