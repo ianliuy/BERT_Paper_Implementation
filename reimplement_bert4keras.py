@@ -498,7 +498,7 @@ class Transformer(object):
         """
         return {}
 
-    def load_weight_from_checkpoint(self, checkpoint, mapping=None):
+    def load_weights_from_checkpoint(self, checkpoint, mapping=None):
         """根据mapping从checkpoint加载权重
         """
         mapping = mapping or self.variable_mapping()
@@ -673,6 +673,8 @@ class BERT(M.Transformer):
         # ]
         z = self.layer_norm_conds[0] # layer_norm_cond
 
+        # for i in range(self.num_hidden_layers):
+        #     outputs = self.prepare_main_layers(outputs, i)
         attention_name = 'Transformer-%d-MultiHeadSelfAttention' % index
         feed_forward_name = 'Transformer-%d-FeedForward' % index
         # 好像在transformer模型里并没有实现过程,
@@ -875,12 +877,22 @@ class BERT(M.Transformer):
                     prefix + 'attention/output/LayerNorm/gamma',
                 ],
                 'Transformer-%d-FeedForward' % i: [
-                    prefix + 'intermediate/dense/kernel'
-                ]
-
+                    prefix + 'intermediate/dense/kernel',
+                    prefix + 'intermediate/dense/bias',
+                    prefix + 'output/dense/kernel',
+                    prefix + 'output/dense/bias',
+                ],
+                'Transformer-%d-FeedForward-Norm' % i:[
+                    prefix + 'output/LayerNorm/beta',
+                    prefix + 'output/LayerNorm/gamma',
+                ],
             })
 
-
+        mapping = {k: v for k, v in mapping.items() if k in self.layers}
+        # mapping就是一个字典
+        # 但是其中key是string，也就是各个层的名字
+        # value是list of string，其中只有一个string，就是官方的名字
+        return mapping
 
 
 import json
@@ -966,6 +978,9 @@ def build_transformer_model(config_path=None,
     # 这一步没看懂, 为什么return transformer model就返回了.model
     # 这是keras的机制吗?
     # 或者是... 变量transformer实例化的类是什么?
+    # Transformer是一个BERT类，继承了Transformer类
+    # 我明白了，因为BERT类中的build函数里有
+    # self.model = Model(self.inputs, self.outputs, name=self.name)
     if return_keras_model:
         return transformer.model
     else:
