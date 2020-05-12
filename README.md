@@ -1,5 +1,13 @@
 # Reimplement_bert4keras
+
+(2020/05/12 update) 自己手撸bert模型，成功加载 (1014 Lines of Code)
+
+![](https://raw.githubusercontent.com/yiyangiliu/Reimplement_bert4keras/master/resources/Clip_20200512_214036.png)
+
+## Motivation
+
 自己实现的bert4keras，在一个文件内写出所有功能，并且尽量逻辑清晰
+
 ## 哲学
 
 尽量只使用keras、tensorflow这种库，逐步不使用bert4keras库
