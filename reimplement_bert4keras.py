@@ -1,7 +1,9 @@
 # import bert4keras
+import tensorflow as tf
 from keras.models import Model
 import bert4keras.models as M
 import bert4keras.layers as L
+from bert4keras.backend import K
 import numpy as np
 import unicodedata
 import re
@@ -360,30 +362,6 @@ class Transformer(object):
         self.layers = {} if layers is None else layers
         self.name = name
 
-    def set_inputs(self,
-                   inputs,
-                   additional_input_layers=None):
-        """设置input和inputs属性
-        """
-        if inputs is None:
-            inputs = []
-        elif not isinstance(inputs, list):
-            inputs = [inputs]
-
-        inputs = inputs[:] # 没看懂
-        if additional_input_layers is not None:
-            if not isinstance(additional_input_layers, list):
-                additional_input_layers = [additional_input_layers]
-            inputs.extend(additional_input_layers)
-
-        self.inputs = inputs
-        # 如果inputs多于1个,就整个传给input
-        # 如果inputs等于一个, input就取inputs[0] 唯一的一个
-        if len(inputs) > 1:
-            self.input = inputs
-        else:
-            self.input = inputs[0]
-
     def build(self,
               layer_norm_cond=None,
               layer_norm_cond_hidden_size=None,
@@ -411,7 +389,7 @@ class Transformer(object):
         outputs = self.prepare_embeddings(outputs)
 
         # Main
-        for i in range (self.num_hidden_layers):
+        for i in range(self.num_hidden_layers):
             outputs = self.prepare_main_layers(outputs, i)
 
         # Final
@@ -420,6 +398,26 @@ class Transformer(object):
 
         # Model
         self.model = Model(self.inputs, self.outputs, name=self.name)
+
+    def call(self, inputs, layer=None, arguments=None, **kwargs):
+        """通过call调用层会自动重命名层
+        inputs: 上一层的输出；
+        layer: 要调用的层类名
+        arguments: 传递给layer.call的参数
+        kwargs: 传递给层初始化的参数
+        """
+        if layer is L.Dropout and self.dropout_rate == 0:
+            # 如果dropout_rate属性为0
+            # 就原地TP
+            return inputs
+
+        arguments = arguments or {}
+        name = kwargs.get('name')
+        if name not in self.layers:
+            layer = L.layer(**kwargs)
+            name = layer.name
+            self.layers[name] = layer
+        return self.layers[name](inputs, **arguments)
 
     def prepare_inputs(self):
         raise NotImplementedError
@@ -433,6 +431,33 @@ class Transformer(object):
     def prepare_final_layers(self, inputs):
         raise NotImplementedError
 
+    def compute_attention_mask(self, inputs=None):
+        """定义每一层的Attention Mask
+        """
+        return self.attention_mask
+
+    def set_inputs(self, inputs, additional_input_layers=None):
+        """设置input和inputs属性
+        """
+        if inputs is None:
+            inputs = []
+        elif not isinstance(inputs, list):
+            inputs = [inputs]
+
+        inputs = inputs[:] # 没看懂
+        if additional_input_layers is not None:
+            if not isinstance(additional_input_layers, list):
+                additional_input_layers = [additional_input_layers]
+            inputs.extend(additional_input_layers)
+
+        self.inputs = inputs
+        # 如果inputs多于1个,就整个传给input
+        # 如果inputs等于一个, input就取inputs[0] 唯一的一个
+        if len(inputs) > 1:
+            self.input = inputs
+        else:
+            self.input = inputs[0]
+
     def set_outputs(self, outputs):
         """设置output和outputs属性
         """
@@ -442,9 +467,9 @@ class Transformer(object):
         outputs = outputs[:]
         self.outputs = outputs
         if len(outputs) > 1:
-            self.outputs = outputs
+            self.output = outputs
         else:
-            self.outputs = outputs[0]
+            self.output = outputs[0]
 
 
 
@@ -463,6 +488,37 @@ class Transformer(object):
 
         return inputs
 
+    def load_variable(self, checkpoint, name):
+        """加载单个变量的函数
+        """
+        return tf.train.load_variable(checkpoint, name)
+
+    def variable_mapping(self):
+        """构建keras层与checkpoint的变量名之间的映射表
+        """
+        return {}
+
+    def load_weight_from_checkpoint(self, checkpoint, mapping=None):
+        """根据mapping从checkpoint加载权重
+        """
+        mapping = mapping or self.variable_mapping()
+
+        weight_value_pairs = []
+        for layer, variables in mapping.items():
+            # 外部传入的keras层, dictionary, 不指定默认={}
+            layer = self.layers[layer]
+            weights = layer.trainable_weights
+            values = [self.load_variable(checkpoint, v) for v in variables]
+            # Iterates over its argument and adding each element to the list
+            # and extending the list. The length of the list increases
+            # by number of elements in it’s argument.
+            # https://www.geeksforgeeks.org/append-extend-python/
+            weight_value_pairs.extend(zip(weights, values))
+
+        K.batch_set_value(weight_value_pairs)
+
+
+
 
 class BERT(M.Transformer):
     """构建bert模型
@@ -472,7 +528,7 @@ class BERT(M.Transformer):
                  with_pool=False, # 是否包含Pool部分
                  with_nsp=False, # 是否包含NSP部分
                  with_mlm=False, # 是否包含MLM部分
-                 ** kwargs # 其余参数
+                 **kwargs # 其余参数
                  ):
         super(BERT, self).__init__(**kwargs)
         # 这一步真的需要吗? 感觉没有用到MRO
@@ -499,8 +555,8 @@ class BERT(M.Transformer):
         # shape: A shape tuple (integer), not including the batch size.
         #     For instance, `shape=(32,)` indicates that the expected input
         #     will be batches of 32-dimensional vectors.
-        x_in = L.Input(shape=(None,), name='Input-Token')
-        s_in = L.Input(shape=(None,), name='Input-Segment')
+        x_in = L.Input(shape=(None, ), name='Input-Token')
+        s_in = L.Input(shape=(None, ), name='Input-Segment')
         return [x_in, s_in]
 
     def prepare_embeddings(self, inputs):
@@ -548,9 +604,8 @@ class BERT(M.Transformer):
                       input_dim=self.max_position,
                       output_dim=self.embedding_size,
                       merge_mode='add',
-                      embedding_initializer=self.initializer,
-                      mask_zero=True,
-                      name='Embedding-Token')
+                      embeddings_initializer=self.initializer,
+                      name='Embedding-Position')
         # (z is not None) 返回的结果是一个bool, 而不是一个bool的tuple
         # tuple: 类似list, 但是ordered and unchanged
         # self.layer_norm_conds = [
@@ -561,8 +616,8 @@ class BERT(M.Transformer):
         x = self.call(inputs=self.simplify([x, z]),
                       layer=L.LayerNormalization,
                       conditional=(z is not None),
-                      hidden_unites=self.layer_norm_conds[1], #layer_norm_cond_hidden_size
-                      hidden_actibation=self.layer_norm_conds[2], # layer_norm_cond_hidden_act or 'linear'
+                      hidden_units=self.layer_norm_conds[1], #layer_norm_cond_hidden_size
+                      hidden_activation=self.layer_norm_conds[2], # layer_norm_cond_hidden_act or 'linear'
                       hidden_initializer=self.initializer,
                       name='Embedding-Norm')
         # 我还是不懂, 什么是layer, 什么是inputs 什么是outputs
@@ -588,12 +643,9 @@ class BERT(M.Transformer):
                           layer=L.Dense,
                           units=self.hidden_size,
                           kernel_initializer=self.initializer,
-                          name="Embedding-Mapping")
+                          name='Embedding-Mapping')
 
         return x
-
-    def compute_attention_mask(self, inputs=None):
-        return self.attention_mask
 
     def prepare_main_layers(self, inputs, index):
         """Bert的主体是基于Multi-Head Self Attention多头自注意力机制
@@ -622,7 +674,7 @@ class BERT(M.Transformer):
         z = self.layer_norm_conds[0] # layer_norm_cond
 
         attention_name = 'Transformer-%d-MultiHeadSelfAttention' % index
-        feed_forward_name = 'Tansformer-%d-FeedForward' % index
+        feed_forward_name = 'Transformer-%d-FeedForward' % index
         # 好像在transformer模型里并没有实现过程,
         # 仅仅返回了self.attention_mask
         # 而 self.attention_mask = None
@@ -635,7 +687,7 @@ class BERT(M.Transformer):
         attention_mask = self.compute_attention_mask()
 
         # Multi-Head Self Attention
-        x1, x, arguments = x, [x, x, x], {'a_mask': None}
+        xi, x, arguments = x, [x, x, x], {'a_mask': None}
         if attention_mask is not None:
             arguments['a_mask'] = True
             x.append(attention_mask)
@@ -650,7 +702,7 @@ class BERT(M.Transformer):
                       rate=self.dropout_rate,
                       name='%s-Dropout' % attention_name)
         # Add
-        x = self.call(inputs=[x1, x],
+        x = self.call(inputs=[xi, x],
                       layer=L.Add,
                       name='%s-Add' % attention_name)
         # LN
@@ -676,7 +728,7 @@ class BERT(M.Transformer):
                       rate=self.dropout_rate,
                       name='%s-Dropout' % feed_forward_name)
         # Add
-        x = self.call(inputs=[x1, x],
+        x = self.call(inputs=[xi, x],
                       layer=L.Add,
                       name='%s-Add' % feed_forward_name)
         # LN
@@ -712,7 +764,7 @@ class BERT(M.Transformer):
             x = outputs[0]
             x = self.call(inputs=x,
                           layer=L.Lambda,
-                          function=lambda x:x[:, 0],
+                          function=lambda x: x[:, 0],
                           name='Pooler')
             # 这句话的意思就是, 如果with_pool=True, 默认'tanh'
             # 如果with_pool='随便一个字符串', pool_activation='这个字符串'
@@ -739,8 +791,8 @@ class BERT(M.Transformer):
             x = outputs[0]
             x = self.call(inputs=x,
                           layer=L.Dense,
-                          unit=self.embedding_size,
-                          activation=self.hidden_size,
+                          units=self.embedding_size,
+                          activation=self.hidden_act,
                           kernel_initializer=self.initializer,
                           name='MLM-Dense')
             # 我还是没搞懂simplify是什么
@@ -751,25 +803,84 @@ class BERT(M.Transformer):
                           hidden_units=self.layer_norm_conds[1],
                           hidden_activation=self.layer_norm_conds[2],
                           hidden_initializer=self.initializer,
-                          name='MLM-Nom')
+                          name='MLM-Norm')
             mlm_activation = 'softmax' if self.with_mlm is True else self.with_mlm
             x = self.call(inputs=x,
-                          layer=L.Embedding,
+                          layer=L.EmbeddingDense,
                           embedding_name='Embedding-Token',
                           activation=mlm_activation,
                           name='MLM-Proba')
             outputs.append(x)
 
-            # 这是什么意思, 看不懂
-            # 去掉开头的[CLS] token的意思吗?
-            if len(outputs) == 1:
-                outputs = outputs[0]
-            elif len(outputs) == 2:
-                outputs = outputs[1]
-            else:
-                outputs = outputs[1:]
+        # 这是什么意思, 看不懂
+        # 去掉开头的[CLS] token的意思吗?
+        if len(outputs) == 1:
+            outputs = outputs[0]
+        elif len(outputs) == 2:
+            outputs = outputs[1]
+        else:
+            outputs = outputs[1:]
 
-            return outputs
+        return outputs
+
+    def variable_mapping(self):
+        """映射到官方BERT权重格式
+        """
+        mapping = {
+            'Embedding-Token': ['bert/embeddings/word_embeddings'],
+            'Embedding-Segment': ['bert/embeddings/token_type_embeddings'],
+            'Embedding-Position': ['bert/embeddings/position_embeddings'],
+            'Embedding-Norm': [
+                'bert/embeddings/LayerNorm/beta',
+                'bert/embeddings/LayerNorm/gamma',
+            ],
+            'Embedding-Mapping': [
+                'bert/encoder/embedding_hidden_mapping_in/kernel',
+                'bert/encoder/embedding_hidden_mapping_in/bias',
+            ],
+            'Pooler-Dense': [
+                'bert/pooler/dense/kernel',
+                'bert/pooler/dense/bias',
+            ],
+            'NSP-Proba': [
+                'cls/seq_relationship/output_weights',
+                'cls/seq_relationship/output_bias',
+            ],
+            'MLM-Dense': [
+                'cls/predictions/transform/dense/kernel',
+                'cls/predictions/transform/dense/bias',
+            ],
+            'MLM-Norm': [
+                'cls/predictions/tansfomer/LayerNorm/beta',
+                'cls/predictions/transform/LayerNorm/gamma',
+            ],
+            'MLM-Proba': ['cls/predictions/output_bias'],
+        }
+
+        for i in range(self.num_hidden_layers):
+            prefix = 'bert/encoder/layer_%d' % i
+            mapping.update({
+                'Transformer-%d-MultiHeadSelfAttention' % i: [
+                    prefix + 'attention/self/query/kernel',
+                    prefix + 'attention/self/query/bias',
+                    prefix + 'attention/self/key/kernel',
+                    prefix + 'attention/self/key/bias',
+                    prefix + 'attention/self/value/kernel',
+                    prefix + 'attention/self/value/bias',
+                    prefix + 'attention/self/dense/kernel',
+                    prefix + 'attention/self/dense/bias',
+                ],
+                'Transformer-%d-MultiHeadSelfAttention-Norm' % i: [
+                    prefix + 'attention/output/LayerNorm/beta',
+                    prefix + 'attention/output/LayerNorm/gamma',
+                ],
+                'Transformer-%d-FeedForward' % i: [
+                    prefix + 'intermediate/dense/kernel'
+                ]
+
+            })
+
+
 
 
 import json
@@ -779,7 +890,7 @@ def build_transformer_model(config_path=None,
                             application='encoder',
                             return_keras_model=True,
                             **kwargs):
-    """根据配置文件构建模型, 可选加载checkpoint权重
+    """根据配置文件构建模型，可选加载checkpoint权重
     "bert_config.json"
     {
       "attention_probs_dropout_prob": 0.1,
@@ -807,7 +918,7 @@ def build_transformer_model(config_path=None,
     if 'max_position' not in config:
         # "max_position_embeddings": 512,
         config['max_position'] = config.get('max_position_embeddings')
-    if 'drop_out_rate' not in config:
+    if 'dropout_rate' not in config:
         # "hidden_dropout_prob": 0.1,
         config['dropout_rate'] = config.get('hidden_dropout_prob')
 
@@ -830,7 +941,7 @@ def build_transformer_model(config_path=None,
     MODEL = models[model]
 
     # 我还没有用到lm任务和unilm(这是什么?), 不实现
-    # if model != 'T5':
+    # if model != 't5':
     #     # application的意思我还没搞懂
     #     # 但我猜是指语言模型的应用是什么
     #     # 比如'encoder'就是作为编码器, 输入sentence 输出编码
@@ -860,6 +971,16 @@ def build_transformer_model(config_path=None,
     else:
         return transformer
 
+# █
+# ▉
+# ▊
+# ▋
+# ▋
+# ▍
+# ▌
+# ▎
+# ▏
+# ░
 
 
 roberta_dir = "C:/JupyterWorkspace/sentiment-keras4bert/roberta"
