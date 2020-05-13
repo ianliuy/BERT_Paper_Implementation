@@ -1,12 +1,17 @@
 # import bert4keras
+import keras
 import tensorflow as tf
+from keras import initializers as I
+from keras import activations as A
 from keras.models import Model
-import bert4keras.models as M
-import bert4keras.layers as L
-from bert4keras.backend import K
 import numpy as np
 import unicodedata
 import re
+
+import bert4keras.models as M
+import bert4keras.layers as L
+from bert4keras.backend import K
+
 
 def load_vocab(dict_path,
                encoding='utf-8',
@@ -293,7 +298,7 @@ class Tokenizer(object):
         0x2CEB0 <= code <= 0x2EBEF, CJK Unified Ideographs Extension F, https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_Extension_F
         0xF900 <= code <= 0xFADF, 兼容汉字
         0x2F800 <= code <= 0x2FA1F, 兼容扩展
-        rference: https://www.cnblogs.com/straybirds/p/6392306.html
+        reference: https://www.cnblogs.com/straybirds/p/6392306.html
         """
 
         # The ord() function returns an integer representing the Unicode character.
@@ -316,7 +321,7 @@ class Tokenizer(object):
         Cc: Other, control
         Cf: Other, format
         """
-        return unicodedata.category(ch) in ['Cc', 'Cf']
+        return unicodedata.category(ch) in ('Cc', 'Cf')
 
     @staticmethod
     def _is_special(ch):
@@ -329,7 +334,253 @@ class Tokenizer(object):
         True
         """
         # 这句话的意思是, 字符串不为空并且开头结尾是[]
-        return bool(ch) and (ch[0] == "[") and (ch[-1] == "]")
+        return bool(ch) and (ch[0] == '[') and (ch[-1] == ']')
+
+class Embedding(keras.layers.Embedding):
+    """为了适配T5，对Embedding的Mask做特殊处理
+    # 我不太懂这里需不需要删除这一部分
+    # 因为我没有mask的概念
+    """
+    def compute_mask(self, inputs, mask=None):
+        """保证第一个token不被mask
+        """
+        mask = super(Embedding, self).compute_mask(inputs, mask)
+        if mask is not None:
+            mask1 = K.ones_like(mask[:, :1], dtype='bool')
+            mask2 = mask[:, 1:]
+            return K.concatenate([mask1, mask2], 1)
+
+class PositionEmbedding(keras.layers.Layer):
+    """定义位置Embedding，这里的Embedding是可训练的
+    """
+    def __init__(self,
+                 input_dim,
+                 output_dim,
+                 merge_mode='add',
+                 embeddings_initializer='zeros',
+                 **kwargs):
+        super(PositionEmbedding, self).__init__(**kwargs)
+        # input_dim=self.max_position, = max_position_embeddings = 512
+        # output_dim=self.embedding_size, = embedding_size or hidden_size = 1024
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.merge_mode = merge_mode
+        # 这里的get是什么意思，我不懂
+        # 大意就是用全0去初始化位置
+        # 原版中是用的截断初始化正态分布
+        # 产生一个自己定义mean和standard deviation的normal distribution
+        # 然后产生随机数
+        # https://github.com/google-research/bert/blob/master/modeling.py#L495
+        self.embeddings_initializer = I.get(embeddings_initializer)
+
+    def build(self, input_shape):
+        super(PositionEmbedding,self).build(input_shape)
+        # 这里添加的
+        self.embeddings = self.add_weight(
+            name='embeddings',
+            shape=(self.input_dim, self.output_dim),
+            initializer=self.embeddings_initializer,
+        )
+
+    def call(self, inputs, **kwargs):
+        input_shape = K.shape(inputs)
+        batch_size, seq_len = input_shape[0], input_shape[1]
+        pos_embeddings = self.embeddings[: seq_len]
+        # Adds a 1-sized dimension at index "axis
+        pos_embeddings = K.expand_dims(pos_embeddings, 0)
+
+        if self.merge_mode == 'add':
+            return inputs + pos_embeddings
+        else:
+            # Creates a tensor by tiling `x` by `n`
+            pos_embeddings = K.tile(pos_embeddings, [batch_size, 1, 1])
+            return K.concatenate([inputs, pos_embeddings])
+
+    def compute_output_shape(self, input_shape):
+        if self.merge_mode == 'add':
+            return input_shape
+        else:
+            return input_shape[:2] + (input_shape[2] + self.output_dim, )
+
+    def get_config(self):
+        config = {
+            'input_dim': self.input_dim,
+            'output_dim': self.output_dim,
+            'merge_mode': self.merge_mode,
+            'embeddings_initializer': I.serialize(self.embeddings_initializer),
+        }
+        base_config = super(PositionEmbedding, self).get_config()
+        # 这是什么意思？什么叫items(), list(dict.items())之后又是什么？
+        return dict(list(base_config.items()) + list(config.items()))
+
+class LayerNormalization(keras.layers.Layer):
+    """(conditional) Layer Normalization
+    hidden_* 系列参数为有条件输入时(conditional=True)使用
+    """
+    def __init__(self,
+                 center=True,
+                 scale=True,
+                 epsilon=None,
+                 conditional=False,
+                 hidden_units=None,
+                 hidden_activation='linear',
+                 hidden_initializer='glorot_uniform',
+                 **kwargs):
+        super(LayerNormalization, self).__init__(**kwargs)
+        self.center = center
+        self.scale = scale
+        self.conditional = conditional
+        self.hidden_units = hidden_units
+        self.hidden_activation = A.get(hidden_activation)
+        self.hidden_initializer = I.get(hidden_initializer)
+        self.epsilon = epsilon or 1e-12
+
+    def build(self, input_shape):
+        super(LayerNormalization, self).build(input_shape)
+        if self.conditional:
+            # 因为如果使用conditional，inputs = [inputs, condition]
+            # 所以shape
+            shape = (input_shape[0][-1], )
+        else:
+            shape = (input_shape[-1], )
+        if self.center:
+            self.beta = self.add_weight(shape=shape,
+                                        initializer='zeros',
+                                        name='beta')
+        if self.scale:
+            self.gamma = self.add_weight(shape=shape,
+                                         initializer='zero',
+                                         name='gamma')
+        if self.conditional:
+            if self.hidden_units is not None:
+                self.hidden_dense = keras.layers.Dense(
+                    units=self.hidden_units,
+                    activation=self.hidden_activation,
+                    use_bias=False,
+                    kernel_initializer=self.hidden_initializer)
+            # beta是加上的东西，决定中心
+            # gamma是乘上的东西，决定缩放大小
+            if self.center:
+                self.beta_dense = keras.layers.Dense(
+                    units=shape[0],
+                    use_bias=False,
+                    kernel_initializer='zeros')
+            if self.scale:
+                self.gamma_dense = keras.layers.Dense(
+                    units=shape[0],
+                    use_bias=False,
+                    kernel_initializr='zeros')
+
+    def call(self, inputs, **kwargs):
+        """如果是条件Layer Norm，则默认以list为输入，第二个是condition
+        """
+        if self.conditional:
+            inputs, cond = inputs
+            if self.hidden_units is not None:
+                cond = self.hidden_dense(cond)
+            for _ in range(K.ndim(inputs) - K.ndim(cond)):
+                cond = K.expand_dims(cond, 1)
+            if self.center:
+                beta = self.beta_dense(cond) + self.beta
+            if self.scale:
+                gamma = self.gamma_dense(cond) + self.gamma
+        else:
+            if self.center:
+                beta = self.beta
+            if self.scale:
+                gamma = self.gamma
+        outputs = inputs
+        if self.center:
+            mean = K.mean(outputs, axis=-1, keepdims=True)
+            outputs = outputs - mean
+        if self.scale:
+            variance = K.mean(K.square(outputs), axis=-1, keepdims=True)
+            std = K.sqrt(variance + self.epsilon)
+            outputs = outputs / std
+            outputs = outputs * gamma
+        if self.center:
+            outputs = outputs + beta
+        return outputs
+
+    def get_config(self):
+        config = {
+            'center': self.center,
+            'scale': self.scale,
+            'epsilon': self.epsilon,
+            'conditional': self.conditional,
+            'hidden_units': self.hidden_units,
+            'hidden_activation': A.serialize(self.hidden_activation),
+            'hidden_initializer': I.serialize(self.hidden_initializer),}
+        base_config = super(LayerNormalization, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+class MultiHeadAttention(keras.layers.Layer):
+    """多头注意力机制
+    """
+    def __init__(self,
+                 heads,
+                 head_size,
+                 key_size=None,
+                 use_bias=True,
+                 kernel_initializer='glorot_uniform',
+                 **kwargs):
+        super(MultiHeadAttention, self).__init__(**kwargs)
+        self.heads = heads,
+        self.head_size = head_size,
+        self.out_dim = heads * head_size,
+        self.key_size = key_size or head_size,
+        self.use_bias = use_bias,
+        self.kernel_initializer = I.get(kernel_initializer),
+
+    def build(self, input_shape):
+        super(MultiHeadAttention, self).build(input_shape)
+        self.q_dense = keras.layers.Dense(units=self.key_size * self.heads,
+                             use_bias=self.use_bias,
+                             kernel_initializer=self.kernel_initializer)
+        self.k_dense = keras.layers.Dense(units=self.key_size * self.heads,
+                             use_bias=self.use_bias,
+                             kernel_initializer=self.kernel_initializer)
+        self.v_dense = keras.layers.Dense(units=self.out_dim,
+                             use_bias=self.use_bias,
+                             kernel_initializer=self.kernel_initializer)
+        self.o_dense = keras.layers.Dense(units=self.out_dim,
+                             use_bias=self.use_bias,
+                             kernel_initializer=self.kernel_initializer)
+
+    def call(self, inputs, mask=None, a_mask=None, p_bias=None):
+        """实现多头注意力机制
+        q_mask: 对输入的query序列进行mask。
+                主要是将输出结果的padding部分置0
+        v_mask: 对输入的value序列的mask。
+                主要是防止attention读取到padding信息
+        a_mask: 对attention矩阵的mask
+                不同的attention mask对应不同的应用
+        p_bias: 在attention里的位置偏置
+                一般用来指定相对位置编码的种类
+        """
+        q, k, v = inputs[:3]
+        q_mask, v_mask, n = None, None, 3
+        if mask is not None:
+            if mask[0] is not None:
+                q_mask = K.cast(mask[0], K.floatx())
+            if mask[2] is not None:
+                v_mask = K.cast(mask[2], K.floatx())
+        if a_mask:
+            a_mask = inputs[n]
+            n +=1
+        # 线性变换
+        qw = self.q_dense(q)
+        kw = self.k_dense(k)
+        vw = self.v_dense(v)
+        # 形状变换
+        qw = K.reshape(qw, (-1, K.shape(q)[1], self.heads, self.key_size))
+        kw = K.reshape(kw, (-1, K.shape(k)[1], self.heads, self.key_size))
+        vw = K.reshape(vw, (-1, K.shape(v)[1], self.heads, self.head_size))
+        # Attention
+        a = tf.einsum('bjhd,bkhd->bhjk', qw, kw)
+        a = a / self.key_size**0.5
+
+
 
 class Transformer(object):
     """模型基类
@@ -477,7 +728,11 @@ class Transformer(object):
         else:
             self.output = outputs[0]
 
-
+    @property
+    def initializer(self):
+        """默认使用截断正态分布初始化
+        """
+        return keras.initializers.TruncatedNormal(stddev=0.02)
 
     def simplify(self, inputs):
         """将list中的None过滤掉
@@ -551,7 +806,7 @@ class BERT(Transformer):
         """bert的输入是token_ids和segment_ids
         """
         # 1. tensor of ids, 2. tensor of segment_ids
-        # 这里的Input()就是keras.layers.Input()(我初步推断的)
+        # 这里的Input()就是keras.layers.Input()(我初步推断的)(是)
         # Input(shape=None, batch_shape=None,
         #       name=None, dtype=None, sparse=False,
         #       tensor=None):
@@ -561,8 +816,8 @@ class BERT(Transformer):
         # shape: A shape tuple (integer), not including the batch size.
         #     For instance, `shape=(32,)` indicates that the expected input
         #     will be batches of 32-dimensional vectors.
-        x_in = L.Input(shape=(None, ), name='Input-Token')
-        s_in = L.Input(shape=(None, ), name='Input-Segment')
+        x_in = keras.layers.Input(shape=(None, ), name='Input-Token')
+        s_in = keras.layers.Input(shape=(None, ), name='Input-Segment')
         return [x_in, s_in]
 
     def prepare_embeddings(self, inputs):
@@ -581,7 +836,7 @@ class BERT(Transformer):
         # 这一层就是建立一个embedding层,
         # 这一层shape=(vocab_size, embedding_size)
         x = self.call(inputs=x,
-                      layer=L.Embedding,
+                      layer=Embedding,
                       # self.vocab_size = vocab_size 词表大小
                       input_dim=self.vocab_size,
                       # self.embedding_size = embedding_size or hidden_size
@@ -593,7 +848,7 @@ class BERT(Transformer):
         # shape=(2, embedding_size) 我看不懂 真的想不出来
         # self.initializer 竟然没定义, 我更不懂是什么意思了
         s = self.call(inputs=s,
-                      layer=L.Embedding,
+                      layer=Embedding,
                       input_dim=2,
                       output_dim=self.embedding_size,
                       embeddings_initializer=self.initializer,
@@ -628,7 +883,7 @@ class BERT(Transformer):
                       name='Embedding-Norm')
         # 我还是不懂, 什么是layer, 什么是inputs 什么是outputs
         x = self.call(inputs=x,
-                      layer=L.Dropout,
+                      layer=keras.layers.Dropout,
                       rate=self.dropout_rate,
                       name='Embedding-Dropout')
         if self.embedding_size != self.hidden_size:
@@ -646,7 +901,7 @@ class BERT(Transformer):
             # with a much lower dimension.
             # https://en.wikipedia.org/wiki/Word_embedding
             x = self.call(inputs=x,
-                          layer=L.Dense,
+                          layer=keras.layers.Dense,
                           units=self.hidden_size,
                           kernel_initializer=self.initializer,
                           name='Embedding-Mapping')
@@ -703,6 +958,7 @@ class BERT(Transformer):
                       layer=L.MultiHeadAttention,
                       arguments=arguments,
                       heads=self.num_attention_heads,
+                      head_size=self.attention_head_size,
                       kernel_initializer=self.initializer,
                       name=attention_name) # attention_name = 'Transformer-%d-MultiHeadSelfAttention' % index
         x = self.call(inputs=x,
