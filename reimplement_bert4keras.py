@@ -11,6 +11,7 @@ import re
 import bert4keras.models as M
 import bert4keras.layers as L
 from bert4keras.backend import K
+import bert4keras.backend as B
 
 
 def load_vocab(dict_path,
@@ -528,7 +529,7 @@ class MultiHeadAttention(keras.layers.Layer):
         self.heads = heads,
         self.head_size = head_size,
         self.out_dim = heads * head_size,
-        self.key_size = key_size or head_size,
+        self.key_size = head_size or key_size,
         self.use_bias = use_bias,
         self.kernel_initializer = I.get(kernel_initializer),
 
@@ -579,8 +580,124 @@ class MultiHeadAttention(keras.layers.Layer):
         # Attention
         a = tf.einsum('bjhd,bkhd->bhjk', qw, kw)
         a = a / self.key_size**0.5
+        a = B.sequence_masking(a, v_mask, 1, -1)
+        if a_mask is not None:
+            a = a - (1 - a_mask) * 1e12
+        a = K.softmax(a)
+        # 完成输出
+        o = tf.einsum('bhjk,bkhd->bjhd', a, vw)
+        o = K.reshape(o, (-1, K.shape(o)[1], self.out_dim))
+        o = self.o_dense(o)
+        # 返回结果
+        o = B.sequence_masking(o, q_mask, 0)
+        return o
 
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0][0], input_shape[0][1], self.out_dim)
 
+    def compute_mask(self, inputs, mask=None):
+        return mask[0]
+
+    def get_config(self):
+        config = {
+            'heads': self.heads,
+            'head_size': self.head_size,
+            'key_size': self.key_size,
+            'use_bias': self.use_bias,
+            'kernel_initializer': I.serialize(self.kernel_initializer),
+        }
+        base_config = super(MultiHeadAttention, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+class FeedForward(keras.layers.Layer):
+    """FeedForwrd层，其实就是两个Dense层的叠加
+    """
+    def __init__(self,
+                 units,
+                 activation='relu',
+                 use_bias=True,
+                 kernel_initializer='glorot_uniform',
+                 **kwargs):
+        super(FeedForward, self).__init__(**kwargs)
+        self.units = units
+        self.activation = activation
+        self.use_bias = use_bias
+        self.kernel_initializer = I.get(kernel_initializer)
+
+    def build(self, input_shape):
+        super(FeedForward, self).build(input_shape)
+        output_dim = input_shape[-1]
+        if not isinstance(output_dim, int):
+            output_dim = output_dim.value
+
+        self.dense_1 = keras.layers.Dense(units=self.units,
+                                          activation=self.activation,
+                                          use_bias=self.use_bias,
+                                          kernel_initializer=self.kernel_initializer)
+        self.dense_2 = keras.layers.Dense(units=output_dim,
+                                          use_bias=self.use_bias,
+                                          kernel_initializer=self.kernel_initializer)
+
+    def call(self, inputs, **kwargs):
+        x = inputs
+        x = self.dense_1(x)
+        x = self.dense_2(x)
+        return x
+
+    def get_config(self):
+        config = {
+            'units': self.units,
+            'activation': A.serialize(self.activation),
+            'use_bias': self.use_bias,
+            'kernel_initializer': I.serialize(self.kernel_initializer),
+        }
+        base_config = super(FeedForward, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+class EmbeddingDense(keras.layers.Layer):
+    """运算与Dense一致，但是kernel用的Embedding层的embeddings矩阵。
+    根据Embedding层的名字搜索定位Embedding层
+    """
+    def __init__(self,
+                 embedding_name,
+                 activation='softmax',
+                 use_bias=True,
+                 **kwargs):
+        super(EmbeddingDense, self).__init__(**kwargs)
+        self.embedding_name = embedding_name
+        self.activation = activation
+        self.use_bias = use_bias
+
+    def call(self, inputs, **kwargs):
+        if not hasattr(self, 'kernel'):
+            embedding_layer = B.search_layer(inputs, self.embedding_name)
+            if embedding_layer is None:
+                raise Exception('Embedding layer not found')
+
+            self.kernel = K.transpose(embedding_layer.embeddings)
+            self.units = K.int_shape(self.kernel)[1]
+            if self.use_bias:
+                self.bias = self.add_weight(name='bias',
+                                            shape=(self.units, ),
+                                            initializer='zeros')
+
+        outputs = K.dot(inputs, self.kernel)
+        if self.use_bias:
+            outputs = K.bias_add(outputs, self.bias)
+        outputs = self.activation
+        return outputs
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[:-1] + (self.units, )
+
+    def get_config(self):
+        config = {
+            'embedding_name': self.embedding_name,
+            'activation': A.serialize(self.activation),
+            'use_bias': self.use_bias,
+        }
+        base_config = super(EmbeddingDense, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
 
 class Transformer(object):
     """模型基类
@@ -962,12 +1079,12 @@ class BERT(Transformer):
                       kernel_initializer=self.initializer,
                       name=attention_name) # attention_name = 'Transformer-%d-MultiHeadSelfAttention' % index
         x = self.call(inputs=x,
-                      layer=L.Dropout,
+                      layer=keras.layers.Dropout,
                       rate=self.dropout_rate,
                       name='%s-Dropout' % attention_name)
         # Add
         x = self.call(inputs=[xi, x],
-                      layer=L.Add,
+                      layer=keras.layers.Add,
                       name='%s-Add' % attention_name)
         # LN
         # z = self.layer_norm_conds[0] # layer_norm_cond
@@ -988,12 +1105,12 @@ class BERT(Transformer):
                       kernel_initializer=self.initializer,
                       name=feed_forward_name) # feed_forward_name = 'Tansformer-%d-FeedForward' % index
         x = self.call(inputs=x,
-                      layer=L.Dropout,
+                      layer=keras.layers.Dropout,
                       rate=self.dropout_rate,
                       name='%s-Dropout' % feed_forward_name)
         # Add
         x = self.call(inputs=[xi, x],
-                      layer=L.Add,
+                      layer=keras.layers.Add,
                       name='%s-Add' % feed_forward_name)
         # LN
         x = self.call(inputs=self.simplify([x, z]),
@@ -1027,7 +1144,7 @@ class BERT(Transformer):
             #
             x = outputs[0]
             x = self.call(inputs=x,
-                          layer=L.Lambda,
+                          layer=keras.layers.Lambda,
                           function=lambda x: x[:, 0],
                           name='Pooler')
             # 这句话的意思就是, 如果with_pool=True, 默认'tanh'
@@ -1035,7 +1152,7 @@ class BERT(Transformer):
             pool_activation = 'tanh' if self.with_pool is True else self.with_pool
 
             x = self.call(inputs=x,
-                          layer=L.Dense,
+                          layer=keras.layers.Dense,
                           units=self.hidden_size,
                           activation=pool_activation,
                           kernel_initializer=self.initializer,
@@ -1043,18 +1160,18 @@ class BERT(Transformer):
             if self.with_nsp:
                 # Next Sentence Prediction
                 x = self.call(inputs=x,
-                              layer=L.Dense,
+                              layer=keras.layers.Dense,
                               units=2,
                               activation='softmax',
                               kernel_initializer=self.initializer,
                               name='NSP-Proba')
             outputs.append(x)
 
-        # Masked Language Model部分
         if self.with_mlm:
+            # Masked Language Model部分
             x = outputs[0]
             x = self.call(inputs=x,
-                          layer=L.Dense,
+                          layer=keras.layers.Dense,
                           units=self.embedding_size,
                           activation=self.hidden_act,
                           kernel_initializer=self.initializer,
