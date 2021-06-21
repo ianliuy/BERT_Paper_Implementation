@@ -1,4 +1,4 @@
-# Reimplement_bert4keras
+# BERT_Paper_Implementation
 
 (2020/05/12 update) 自己手撸bert模型，成功加载 (1014 Lines of Code)
 
